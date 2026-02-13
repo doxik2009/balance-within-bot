@@ -1,3 +1,5 @@
+from aiogram.types.input_file import BufferedInputFile
+from aiogram.exceptions import TelegramNetworkError
 import asyncio
 import os
 from pathlib import Path
@@ -95,13 +97,14 @@ async def main():
 
         cards = get_cards(DECKS[deck_key]["folder"])
         back_path = DECKS[deck_key]["back"]
+      await send_photo_safe(
+    q.message,
+    back_path,
+    caption=f"{DECKS[deck_key]['title']}\nВыбери карту",
+    reply_markup=kb_cards(deck_key, state.page, len(cards))
+)
 
-        await q.message.delete()
-        await q.message.answer_photo(
-            photo=FSInputFile(back_path),
-            caption=f"{DECKS[deck_key]['title']}\nВыбери карту",
-            reply_markup=kb_cards(deck_key, state.page, len(cards))
-        )
+        
 
     @dp.callback_query(F.data.startswith("page:"))
     async def change_page(q: CallbackQuery):
@@ -128,6 +131,24 @@ async def main():
 
     await dp.start_polling(bot)
 
+async def send_photo_safe(target, path: Path, caption: str = "", reply_markup=None):
+    data = path.read_bytes()
+    file = BufferedInputFile(data, filename=path.name)
+
+    # 3 попытки на случай сетевого сбоя
+    for attempt in range(3):
+        try:
+            return await target.answer_photo(
+                photo=file,
+                caption=caption,
+                reply_markup=reply_markup
+            )
+        except TelegramNetworkError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(1)
+            # пересоздаём объект файла (важно)
+            file = BufferedInputFile(data, filename=path.name)
 
 if __name__ == "__main__":
     asyncio.run(main())
