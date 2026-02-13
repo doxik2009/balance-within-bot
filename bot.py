@@ -222,6 +222,15 @@ async def main():
         await m.answer("\n".join(lines))
 
     @dp.message(Command("export"))
+    @dp.message(Command("reset"))
+async def reset_cmd(m: Message):
+    global STORE
+    STORE = {}
+    STORE["backs"] = {}
+    STORE["cards"] = {}
+    save_store(STORE)
+    await m.answer("✅ Хранилище очищено.")
+
     async def export_cmd(m: Message):
         # осторожно: будет длинно, но это удобно скопировать
         await m.answer("```json\n" + json.dumps(STORE, ensure_ascii=False, indent=2) + "\n```", parse_mode="Markdown")
