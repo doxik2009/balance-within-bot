@@ -12,56 +12,53 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 TOKEN_ENV = "BOT_TOKEN"
 
-# Ключи колод (внутренние), чтобы не зависеть от русских названий
+# 3 колоды (внутренние ключи)
 DECKS = {
-    "state": {"title": "СОСТОЯНИЕ"},
-    "release": {"title": "ОТПУСКАНИЕ"},
-    "resource": {"title": "РЕСУРС"},
+    "state": {"title": "🟣 СОСТОЯНИЕ"},
+    "release": {"title": "🟡 ОТПУСКАНИЕ"},
+    "resource": {"title": "🟢 РЕСУРС"},
 }
 DECK_ORDER = ["state", "release", "resource"]
-PAGE_SIZE = 9
 
-# Файл, куда бот сохраняет file_id
+PAGE_SIZE = 9
+TOTAL_CARDS = 30
+
 STORE_PATH = Path("file_ids.json")
 
 
-def load_store() -> Dict[str, Any]:
-    if STORE_PATH.exists():
-        try:
-            return json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+def _safe_load_json(path: Path) -> Dict[str, Any]:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
     return {}
 
 
-def save_store(data: Dict[str, Any]) -> None:
-    STORE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def _safe_save_json(path: Path, data: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-STORE: Dict[str, Any] = load_store()
-# Структура STORE:
-# {
-#   "backs": {"state": "file_id", "release": "...", "resource": "..."},
-#   "cards": {"state": {"01": "file_id", ...}, "release": {...}, "resource": {...}}
-# }
+STORE: Dict[str, Any] = _safe_load_json(STORE_PATH)
 
 
 def ensure_store_shape():
-    STORE.setdefault("backs", {})
-    STORE.setdefault("cards", {})
+    STORE.setdefault("backs", {})   # backs[deck_key] = file_id
+    STORE.setdefault("cards", {})   # cards[deck_key][num] = file_id
     for dk in DECKS.keys():
         STORE["cards"].setdefault(dk, {})
 
 
 ensure_store_shape()
-save_store(STORE)
+_safe_save_json(STORE_PATH, STORE)
 
 
 @dataclass
 class PlayerState:
-    mode: Optional[str] = None  # "self" или "host"
+    mode: Optional[str] = None     # "self" / "host"
     deck: Optional[str] = None
     page: int = 0
+    picked_idx: Optional[int] = None
 
 
 PLAYERS: Dict[int, PlayerState] = {}
@@ -71,6 +68,20 @@ def get_player(uid: int) -> PlayerState:
     if uid not in PLAYERS:
         PLAYERS[uid] = PlayerState()
     return PLAYERS[uid]
+
+
+def card_num_from_index(idx: int) -> str:
+    return f"{idx + 1:02d}"
+
+
+def next_deck(current: str) -> Optional[str]:
+    try:
+        i = DECK_ORDER.index(current)
+        if i < len(DECK_ORDER) - 1:
+            return DECK_ORDER[i + 1]
+    except ValueError:
+        return None
+    return None
 
 
 def kb_mode():
@@ -83,32 +94,34 @@ def kb_mode():
 
 def kb_decks():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🟣 Состояние", callback_data="deck:state")
-    kb.button(text="🟡 Отпускание", callback_data="deck:release")
-    kb.button(text="🟢 Ресурс", callback_data="deck:resource")
+    kb.button(text=DECKS["state"]["title"], callback_data="deck:state")
+    kb.button(text=DECKS["release"]["title"], callback_data="deck:release")
+    kb.button(text=DECKS["resource"]["title"], callback_data="deck:resource")
     kb.button(text="🔄 Сменить режим", callback_data="go:mode")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def kb_cards(deck_key: str, page: int, total: int):
+def kb_cards(deck_key: str, page: int):
     kb = InlineKeyboardBuilder()
     start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, total)
+    end = min(start + PAGE_SIZE, TOTAL_CARDS)
 
-    # 9 кнопок
     for i in range(start, end):
         kb.button(text=f"🂠 {i - start + 1}", callback_data=f"pick:{deck_key}:{i}:{page}")
 
-    # навигация
+    nav = InlineKeyboardBuilder()
     if page > 0:
-        kb.button(text="◀️", callback_data=f"page:{deck_key}:{page-1}")
-    if end < total:
-        kb.button(text="▶️", callback_data=f"page:{deck_key}:{page+1}")
-
-    kb.button(text="↩️ К колодам", callback_data="go:decks")
+        nav.button(text="◀️", callback_data=f"page:{deck_key}:{page - 1}")
+    if end < TOTAL_CARDS:
+        nav.button(text="▶️", callback_data=f"page:{deck_key}:{page + 1}")
 
     kb.adjust(3)
+    if nav.buttons:
+        kb.row(*nav.buttons)
+
+    kb.button(text="↩️ К колодам", callback_data="go:decks")
+    kb.adjust(3, 2, 1)
     return kb.as_markup()
 
 
@@ -120,81 +133,65 @@ def kb_confirm(deck_key: str, idx: int, page: int):
     return kb.as_markup()
 
 
-def kb_after_open(deck_key: str):
+def kb_after_open(deck_key: str, mode: str):
     kb = InlineKeyboardBuilder()
     nxt = next_deck(deck_key)
     if nxt:
         kb.button(text="➡️ Следующая колода", callback_data=f"deck:{nxt}")
     kb.button(text="🗂️ К колодам", callback_data="go:decks")
+    if mode == "host":
+        kb.button(text="🧩 Подсказка ведущему", callback_data="host:hint")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def next_deck(current: str) -> Optional[str]:
-    try:
-        i = DECK_ORDER.index(current)
-        if i < len(DECK_ORDER) - 1:
-            return DECK_ORDER[i + 1]
-    except ValueError:
-        pass
-    return None
-
-
-def card_num_from_index(idx: int) -> str:
-    # idx 0..29 -> "01".."30"
-    return f"{idx+1:02d}"
-
-
-def get_back_file_id(deck_key: str) -> Optional[str]:
-    return STORE.get("backs", {}).get(deck_key)
-
-
-def get_card_file_id(deck_key: str, num: str) -> Optional[str]:
-    return STORE.get("cards", {}).get(deck_key, {}).get(num)
-
-
-def set_back_file_id(deck_key: str, file_id: str):
-    STORE["backs"][deck_key] = file_id
-    save_store(STORE)
-
-
-def set_card_file_id(deck_key: str, num: str, file_id: str):
-    STORE["cards"].setdefault(deck_key, {})
-    STORE["cards"][deck_key][num] = file_id
-    save_store(STORE)
-
-
-def count_cards(deck_key: str) -> int:
-    # считаем сколько file_id записано
-    return len(STORE.get("cards", {}).get(deck_key, {}))
-
-
-def total_cards_for_deck(deck_key: str) -> int:
-    # у тебя 30 карт; можно оставить 30 даже если не все записаны — тогда будет показывать заглушку
-    return 30
-
-
 HELP_TEXT = (
-    "📌 *Как научить бота картинкам (file_id)*\n\n"
-    "Отправь боту фото (как обычное фото) и подпиши в подписи:\n\n"
-    "— Рубашка для колоды:\n"
-    "`BACK state`  или  `BACK release`  или  `BACK resource`\n\n"
+    "📌 *Загрузка рубашек и карт без размытия*\n\n"
+    "Отправляй изображения боту как **ФАЙЛ (Документ)**, не как Фото.\n\n"
+    "*Подпись (caption) к файлу:*\n"
+    "— Рубашка колоды:\n"
+    "`BACK state` / `BACK release` / `BACK resource`\n\n"
     "— Карта:\n"
     "`CARD state 01`\n"
-    "`CARD state 02`\n"
-    "...\n"
-    "`CARD release 01`\n"
-    "и т.д.\n\n"
+    "`CARD release 15`\n"
+    "`CARD resource 30`\n\n"
     "Команды:\n"
     "/start — начать\n"
+    "/status — проверить, что сохранено\n"
+    "/reset — очистить всё (если загрузилось размыто)\n"
     "/help — эта инструкция\n"
-    "/status — сколько карт сохранено\n"
-    "/export — показать сохранённые file_id\n"
 )
 
 
+def set_back(deck_key: str, file_id: str):
+    STORE["backs"][deck_key] = file_id
+    _safe_save_json(STORE_PATH, STORE)
+
+
+def set_card(deck_key: str, num: str, file_id: str):
+    STORE["cards"].setdefault(deck_key, {})
+    STORE["cards"][deck_key][num] = file_id
+    _safe_save_json(STORE_PATH, STORE)
+
+
+def get_back(deck_key: str) -> Optional[str]:
+    return STORE.get("backs", {}).get(deck_key)
+
+
+def get_card(deck_key: str, num: str) -> Optional[str]:
+    return STORE.get("cards", {}).get(deck_key, {}).get(num)
+
+
+def count_cards(deck_key: str) -> int:
+    return len(STORE.get("cards", {}).get(deck_key, {}))
+
+
 async def main():
-    bot = Bot(os.environ[TOKEN_ENV])
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        raise RuntimeError("BOT_TOKEN is not set")
+
+    bot = Bot(token)
     dp = Dispatcher()
 
     @dp.message(CommandStart())
@@ -203,11 +200,8 @@ async def main():
         st.mode = None
         st.deck = None
         st.page = 0
-        await m.answer(
-            "✨ *BALANCE WITHIN*\n\nВыбери режим:",
-            reply_markup=kb_mode(),
-            parse_mode="Markdown",
-        )
+        st.picked_idx = None
+        await m.answer("✨ *BALANCE WITHIN*\n\nВыбери режим:", reply_markup=kb_mode(), parse_mode="Markdown")
 
     @dp.message(Command("help"))
     async def help_cmd(m: Message):
@@ -215,65 +209,58 @@ async def main():
 
     @dp.message(Command("status"))
     async def status_cmd(m: Message):
-        lines = ["📊 Статус file_id:"]
+        lines = ["📊 *Статус сохранённых file_id:*"]
         for dk in DECKS.keys():
-            b = "✅" if get_back_file_id(dk) else "❌"
-            lines.append(f"- {DECKS[dk]['title']}: рубашка {b}, карт сохранено: {count_cards(dk)}/30")
-        await m.answer("\n".join(lines))
+            b = "✅" if get_back(dk) else "❌"
+            lines.append(f"{DECKS[dk]['title']}: рубашка {b}, карт {count_cards(dk)}/30")
+        await m.answer("\n".join(lines), parse_mode="Markdown")
 
-    @dp.message(Command("export"))
     @dp.message(Command("reset"))
-async def reset_cmd(m: Message):
-    global STORE
-    STORE = {}
-    STORE["backs"] = {}
-    STORE["cards"] = {}
-    save_store(STORE)
-    await m.answer("✅ Хранилище очищено.")
+    async def reset_cmd(m: Message):
+        STORE.clear()
+        ensure_store_shape()
+        _safe_save_json(STORE_PATH, STORE)
+        await m.answer("✅ Очищено. Можно загружать рубашки/карты заново.")
 
-    async def export_cmd(m: Message):
-        # осторожно: будет длинно, но это удобно скопировать
-        await m.answer("```json\n" + json.dumps(STORE, ensure_ascii=False, indent=2) + "\n```", parse_mode="Markdown")
-
-    # Принимаем фото и сохраняем file_id по подписи
-    @dp.message(F.photo)
-    async def handle_photo(m: Message):
+    # Принимаем изображения как ФАЙЛ (Document) — без сжатия
+    @dp.message(F.document)
+    async def handle_document(m: Message):
         caption = (m.caption or "").strip()
         if not caption:
-            await m.answer("Я получила фото ✅\n\nДобавь подпись (caption), чтобы я поняла, куда сохранить.\nНапиши /help")
+            await m.answer("Я получила файл ✅\nДобавь подпись (caption). Напиши /help")
             return
 
-        # Берём самое большое фото
-        file_id = m.photo[-1].file_id
-
+        # Берём file_id документа
+        file_id = m.document.file_id
         parts = caption.split()
-        # ожидаем: BACK state
-        # или: CARD state 01
+
+        # BACK deck
         if len(parts) >= 2 and parts[0].upper() == "BACK":
             dk = parts[1].lower()
             if dk not in DECKS:
-                await m.answer("❌ Не понимаю колоду. Используй: state / release / resource\nНапиши /help")
+                await m.answer("❌ Колода: state / release / resource\nНапиши /help")
                 return
-            set_back_file_id(dk, file_id)
+            set_back(dk, file_id)
             await m.answer(f"✅ Сохранила рубашку для {DECKS[dk]['title']}")
             return
 
+        # CARD deck NN
         if len(parts) >= 3 and parts[0].upper() == "CARD":
             dk = parts[1].lower()
             num = parts[2]
             if dk not in DECKS:
-                await m.answer("❌ Не понимаю колоду. Используй: state / release / resource\nНапиши /help")
+                await m.answer("❌ Колода: state / release / resource\nНапиши /help")
                 return
             if len(num) == 1:
                 num = f"0{num}"
-            if not num.isdigit() or not (1 <= int(num) <= 30):
+            if (not num.isdigit()) or (int(num) < 1 or int(num) > 30):
                 await m.answer("❌ Номер карты должен быть 01..30\nНапиши /help")
                 return
-            set_card_file_id(dk, num, file_id)
+            set_card(dk, num, file_id)
             await m.answer(f"✅ Сохранила карту {DECKS[dk]['title']} {num}")
             return
 
-        await m.answer("❌ Не поняла подпись.\nНапиши /help (там примеры подписи).")
+        await m.answer("❌ Не поняла подпись.\nНапиши /help (там примеры).")
 
     @dp.callback_query(F.data == "go:mode")
     async def go_mode(q: CallbackQuery):
@@ -282,6 +269,7 @@ async def reset_cmd(m: Message):
         st.mode = None
         st.deck = None
         st.page = 0
+        st.picked_idx = None
         await q.message.answer("Выбери режим:", reply_markup=kb_mode())
 
     @dp.callback_query(F.data.startswith("mode:"))
@@ -303,14 +291,13 @@ async def reset_cmd(m: Message):
         st = get_player(q.from_user.id)
         st.deck = deck_key
         st.page = 0
+        st.picked_idx = None
 
-        back_id = get_back_file_id(deck_key)
-        total = total_cards_for_deck(deck_key)
-
+        back_id = get_back(deck_key)
         if not back_id:
             await q.message.answer(
-                f"❌ Для колоды *{DECKS[deck_key]['title']}* ещё не сохранена рубашка.\n"
-                f"Отправь фото с подписью: `BACK {deck_key}`",
+                f"❌ Для {DECKS[deck_key]['title']} ещё нет рубашки.\n"
+                f"Отправь файл с подписью: `BACK {deck_key}`",
                 parse_mode="Markdown",
             )
             return
@@ -318,7 +305,7 @@ async def reset_cmd(m: Message):
         await q.message.answer_photo(
             photo=back_id,
             caption=f"{DECKS[deck_key]['title']}\nВыбери карту (можно листать)",
-            reply_markup=kb_cards(deck_key, st.page, total),
+            reply_markup=kb_cards(deck_key, st.page),
         )
 
     @dp.callback_query(F.data.startswith("page:"))
@@ -327,10 +314,7 @@ async def reset_cmd(m: Message):
         _, deck_key, page_str = q.data.split(":")
         st = get_player(q.from_user.id)
         st.page = int(page_str)
-
-        total = total_cards_for_deck(deck_key)
-        # просто обновляем кнопки
-        await q.message.edit_reply_markup(reply_markup=kb_cards(deck_key, st.page, total))
+        await q.message.edit_reply_markup(reply_markup=kb_cards(deck_key, st.page))
 
     @dp.callback_query(F.data.startswith("pick:"))
     async def pick(q: CallbackQuery):
@@ -338,7 +322,6 @@ async def reset_cmd(m: Message):
         _, deck_key, idx_str, page_str = q.data.split(":")
         idx = int(idx_str)
         page = int(page_str)
-        num = card_num_from_index(idx)
 
         await q.message.answer(
             "Почувствуй, готова ли ты открыть эту карту.\n\n"
@@ -353,16 +336,29 @@ async def reset_cmd(m: Message):
         idx = int(idx_str)
         num = card_num_from_index(idx)
 
-        card_id = get_card_file_id(deck_key, num)
+        card_id = get_card(deck_key, num)
         if not card_id:
             await q.message.answer(
-                f"❌ Карта {DECKS[deck_key]['title']} {num} ещё не сохранена.\n"
-                f"Отправь фото с подписью: `CARD {deck_key} {num}`",
+                f"❌ Карта {DECKS[deck_key]['title']} {num} ещё не загружена.\n"
+                f"Отправь файл с подписью: `CARD {deck_key} {num}`",
                 parse_mode="Markdown",
             )
             return
 
-        await q.message.answer_photo(photo=card_id, reply_markup=kb_after_open(deck_key))
+        st = get_player(q.from_user.id)
+        await q.message.answer_photo(photo=card_id, reply_markup=kb_after_open(deck_key, st.mode or "self"))
+
+    @dp.callback_query(F.data == "host:hint")
+    async def host_hint(q: CallbackQuery):
+        await q.answer()
+        await q.message.answer(
+            "🤍 *Подсказка ведущему*\n\n"
+            "— Не интерпретируй карту и не давай советов.\n"
+            "— Поддерживай паузы.\n"
+            "— Мягкие вопросы: «Что сейчас важно?», «Где это в теле?»\n"
+            "— Если участница не хочет отвечать — это нормально.",
+            parse_mode="Markdown",
+        )
 
     await dp.start_polling(bot)
 
