@@ -12,7 +12,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 TOKEN_ENV = "BOT_TOKEN"
 
-# 3 колоды (внутренние ключи)
 DECKS = {
     "state": {"title": "🟣 СОСТОЯНИЕ"},
     "release": {"title": "🟡 ОТПУСКАНИЕ"},
@@ -26,39 +25,38 @@ TOTAL_CARDS = 30
 STORE_PATH = Path("file_ids.json")
 
 
-def _safe_load_json(path: Path) -> Dict[str, Any]:
+def load_store() -> Dict[str, Any]:
     try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+        if STORE_PATH.exists():
+            return json.loads(STORE_PATH.read_text(encoding="utf-8"))
     except Exception:
         pass
     return {}
 
 
-def _safe_save_json(path: Path, data: Dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_store(data: Dict[str, Any]) -> None:
+    STORE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-STORE: Dict[str, Any] = _safe_load_json(STORE_PATH)
+STORE: Dict[str, Any] = load_store()
 
 
 def ensure_store_shape():
-    STORE.setdefault("backs", {})   # backs[deck_key] = file_id
-    STORE.setdefault("cards", {})   # cards[deck_key][num] = file_id
+    STORE.setdefault("backs", {})   # backs[deck] = document_file_id
+    STORE.setdefault("cards", {})   # cards[deck][num] = document_file_id
     for dk in DECKS.keys():
         STORE["cards"].setdefault(dk, {})
 
 
 ensure_store_shape()
-_safe_save_json(STORE_PATH, STORE)
+save_store(STORE)
 
 
 @dataclass
 class PlayerState:
-    mode: Optional[str] = None     # "self" / "host"
+    mode: Optional[str] = None
     deck: Optional[str] = None
     page: int = 0
-    picked_idx: Optional[int] = None
 
 
 PLAYERS: Dict[int, PlayerState] = {}
@@ -146,32 +144,30 @@ def kb_after_open(deck_key: str, mode: str):
 
 
 HELP_TEXT = (
-    "📌 *Загрузка рубашек и карт без размытия*\n\n"
-    "Отправляй изображения боту как **ФАЙЛ (Документ)**, не как Фото.\n\n"
-    "*Подпись (caption) к файлу:*\n"
-    "— Рубашка колоды:\n"
+    "📌 *Загрузка без размытия*\n\n"
+    "Отправляй изображения боту как **ФАЙЛ (Документ)**.\n\n"
+    "*Подпись к файлу:*\n"
+    "— Рубашка:\n"
     "`BACK state` / `BACK release` / `BACK resource`\n\n"
     "— Карта:\n"
     "`CARD state 01`\n"
     "`CARD release 15`\n"
     "`CARD resource 30`\n\n"
     "Команды:\n"
-    "/start — начать\n"
-    "/status — проверить, что сохранено\n"
-    "/reset — очистить всё (если загрузилось размыто)\n"
-    "/help — эта инструкция\n"
+    "/start /status /reset /help\n\n"
+    "⚠️ Важно: раз загружаем как документ — бот показывает карты тоже как **документы**, чтобы текст был чёткий."
 )
 
 
 def set_back(deck_key: str, file_id: str):
     STORE["backs"][deck_key] = file_id
-    _safe_save_json(STORE_PATH, STORE)
+    save_store(STORE)
 
 
 def set_card(deck_key: str, num: str, file_id: str):
     STORE["cards"].setdefault(deck_key, {})
     STORE["cards"][deck_key][num] = file_id
-    _safe_save_json(STORE_PATH, STORE)
+    save_store(STORE)
 
 
 def get_back(deck_key: str) -> Optional[str]:
@@ -200,7 +196,6 @@ async def main():
         st.mode = None
         st.deck = None
         st.page = 0
-        st.picked_idx = None
         await m.answer("✨ *BALANCE WITHIN*\n\nВыбери режим:", reply_markup=kb_mode(), parse_mode="Markdown")
 
     @dp.message(Command("help"))
@@ -219,10 +214,10 @@ async def main():
     async def reset_cmd(m: Message):
         STORE.clear()
         ensure_store_shape()
-        _safe_save_json(STORE_PATH, STORE)
-        await m.answer("✅ Очищено. Можно загружать рубашки/карты заново.")
+        save_store(STORE)
+        await m.answer("✅ Очищено. Можно загружать заново.")
 
-    # Принимаем изображения как ФАЙЛ (Document) — без сжатия
+    # Принимаем без сжатия: документ + подпись
     @dp.message(F.document)
     async def handle_document(m: Message):
         caption = (m.caption or "").strip()
@@ -230,11 +225,9 @@ async def main():
             await m.answer("Я получила файл ✅\nДобавь подпись (caption). Напиши /help")
             return
 
-        # Берём file_id документа
         file_id = m.document.file_id
         parts = caption.split()
 
-        # BACK deck
         if len(parts) >= 2 and parts[0].upper() == "BACK":
             dk = parts[1].lower()
             if dk not in DECKS:
@@ -244,7 +237,6 @@ async def main():
             await m.answer(f"✅ Сохранила рубашку для {DECKS[dk]['title']}")
             return
 
-        # CARD deck NN
         if len(parts) >= 3 and parts[0].upper() == "CARD":
             dk = parts[1].lower()
             num = parts[2]
@@ -269,7 +261,6 @@ async def main():
         st.mode = None
         st.deck = None
         st.page = 0
-        st.picked_idx = None
         await q.message.answer("Выбери режим:", reply_markup=kb_mode())
 
     @dp.callback_query(F.data.startswith("mode:"))
@@ -291,20 +282,19 @@ async def main():
         st = get_player(q.from_user.id)
         st.deck = deck_key
         st.page = 0
-        st.picked_idx = None
 
         back_id = get_back(deck_key)
         if not back_id:
             await q.message.answer(
-                f"❌ Для {DECKS[deck_key]['title']} ещё нет рубашки.\n"
-                f"Отправь файл с подписью: `BACK {deck_key}`",
+                f"❌ Для {DECKS[deck_key]['title']} ещё нет рубашки.\nОтправь файл с подписью: `BACK {deck_key}`",
                 parse_mode="Markdown",
             )
             return
 
-        await q.message.answer_photo(
-            photo=back_id,
-            caption=f"{DECKS[deck_key]['title']}\nВыбери карту (можно листать)",
+        # Важно: показываем рубашку как ДОКУМЕНТ (без сжатия)
+        await q.message.answer_document(
+            document=back_id,
+            caption=f"{DECKS[deck_key]['title']}\nВыбери карту (кнопки снизу)",
             reply_markup=kb_cards(deck_key, st.page),
         )
 
@@ -324,8 +314,7 @@ async def main():
         page = int(page_str)
 
         await q.message.answer(
-            "Почувствуй, готова ли ты открыть эту карту.\n\n"
-            "Если отклика нет — вернись и выбери другую.",
+            "Почувствуй, готова ли ты открыть эту карту.\n\nЕсли отклика нет — вернись и выбери другую.",
             reply_markup=kb_confirm(deck_key, idx, page),
         )
 
@@ -339,14 +328,18 @@ async def main():
         card_id = get_card(deck_key, num)
         if not card_id:
             await q.message.answer(
-                f"❌ Карта {DECKS[deck_key]['title']} {num} ещё не загружена.\n"
-                f"Отправь файл с подписью: `CARD {deck_key} {num}`",
+                f"❌ Карта {DECKS[deck_key]['title']} {num} ещё не загружена.\nОтправь файл с подписью: `CARD {deck_key} {num}`",
                 parse_mode="Markdown",
             )
             return
 
         st = get_player(q.from_user.id)
-        await q.message.answer_photo(photo=card_id, reply_markup=kb_after_open(deck_key, st.mode or "self"))
+        # Важно: отправляем как ДОКУМЕНТ (качество 100%)
+        await q.message.answer_document(
+            document=card_id,
+            caption="",
+            reply_markup=kb_after_open(deck_key, st.mode or "self"),
+        )
 
     @dp.callback_query(F.data == "host:hint")
     async def host_hint(q: CallbackQuery):
@@ -355,7 +348,7 @@ async def main():
             "🤍 *Подсказка ведущему*\n\n"
             "— Не интерпретируй карту и не давай советов.\n"
             "— Поддерживай паузы.\n"
-            "— Мягкие вопросы: «Что сейчас важно?», «Где это в теле?»\n"
+            "— Вопросы: «Что сейчас важно?», «Где это в теле?»\n"
             "— Если участница не хочет отвечать — это нормально.",
             parse_mode="Markdown",
         )
